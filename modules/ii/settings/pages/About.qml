@@ -17,7 +17,7 @@ ContentPage {
         Quickshell.execDetached([
             "kitty", "--hold",
             "fish", "-i", "-l", "-c",
-            "yay -Syu --combinedupgrade=false"
+            "paru -Syu"
         ])
         Qt.callLater(() => GlobalStates.settingsOpen = false)
     }
