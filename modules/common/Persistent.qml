@@ -87,6 +87,11 @@ Singleton {
                 property bool enable: false
             }
 
+            property JsonObject vpn: JsonObject {
+                property bool restoreOnStartup: false
+                property string lastConnectedUuid: ""
+            }
+
             property JsonObject overlay: JsonObject {
                 property list<string> open: ["crosshair", "recorder", "volumeMixer", "resources"]
                 property JsonObject crosshair: JsonObject {
