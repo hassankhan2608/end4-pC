@@ -49,6 +49,34 @@ Item {
         return filterDuplicatePlayers(filtered)
     }
 
+    function filterDuplicatePlayers(players) {
+        let filtered = [];
+        let used = new Set();
+
+        for (let i = 0; i < players.length; ++i) {
+            if (used.has(i))
+                continue;
+            let p1 = players[i];
+            let group = [i];
+
+            // Find duplicates by trackTitle prefix
+            for (let j = i + 1; j < players.length; ++j) {
+                let p2 = players[j];
+                if (p1.trackTitle && p2.trackTitle && (p1.trackTitle.includes(p2.trackTitle) || p2.trackTitle.includes(p1.trackTitle)) || (p1.position - p2.position <= 2 && p1.length - p2.length <= 2)) {
+                    group.push(j);
+                }
+            }
+
+            // For each duplicate group, only keep players that are "real"
+            let realGroup = group.filter(i => MprisController.isRealPlayer(players[i]));
+            if (realGroup.length === 0)
+                realGroup = [group[0]]; // fallback
+            for (const idx of realGroup)
+                filtered.push(players[idx]);
+        }
+        return filtered;
+    }
+
     Connections {
         target: GlobalStates
         function onSidebarRightOpenChanged() {
