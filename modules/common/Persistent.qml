@@ -72,6 +72,7 @@ Singleton {
                     property bool collapsed: false
                     property int tab: 0
                 }
+                property bool taildropCollapsed: false
             }
 
             property JsonObject booru: JsonObject {
@@ -85,6 +86,11 @@ Singleton {
 
             property JsonObject record: JsonObject {
                 property bool enable: false
+            }
+
+            property JsonObject vpn: JsonObject {
+                property bool restoreOnStartup: false
+                property string lastConnectedUuid: ""
             }
 
             property JsonObject overlay: JsonObject {

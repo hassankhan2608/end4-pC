@@ -10,157 +10,320 @@ import qs.modules.common
 Singleton {
     id: root
 
-    property list<var> profiles: []
-    property list<string> activeUuids: []
-    property string selectedUuid: ""
-    property bool busy: connectProc.running || disconnectProc.running || actionProc.running
-    property string pendingUuid: ""
-
     signal dialogRequested()
 
-    readonly property var activeProfile: profiles.find(p => activeUuids.includes(p.uuid)) ?? null
-    readonly property var selectedProfile: activeProfile
-        ?? profiles.find(p => p.uuid === selectedUuid)
-        ?? profiles[0]
-        ?? null
-    readonly property bool available: profiles.length > 0
-    readonly property bool connected: activeProfile !== null
+    property var profiles: []
+    property string preferredUuid: ""
+    property string pendingUuid: ""
+    property string pendingOperation: ""
+    property string lastError: ""
+    property bool initialRefreshComplete: false
+    property bool restoreAttempted: false
 
-    function splitFields(line) {
-        const fields = [];
-        let current = "";
-        for (let i = 0; i < line.length; i++) {
-            const ch = line[i];
-            if (ch === "\\" && i + 1 < line.length) {
-                current += line[++i];
-            } else if (ch === ":") {
-                fields.push(current);
-                current = "";
+    readonly property bool refreshing: refreshProcess.running
+    readonly property bool busy: actionProcess.running
+    readonly property bool importing: importProcess.running
+    readonly property var activeProfiles: profiles.filter(profile => profile.active)
+    readonly property bool connected: activeProfiles.length > 0
+    readonly property string activeName: activeProfiles[0]?.name ?? ""
+    readonly property string statusText: {
+        if (busy && pendingOperation === "connect") return Translation.tr("Connecting...")
+        if (busy && pendingOperation === "disconnect") return Translation.tr("Disconnecting...")
+        if (connected) return activeName
+        return Translation.tr("Disconnected")
+    }
+
+    readonly property var importTypes: [
+        { id: "wireguard", name: "WireGuard", extensions: ["*.conf"] },
+        { id: "openvpn", name: "OpenVPN", extensions: ["*.ovpn", "*.conf"] },
+        { id: "openconnect", name: "OpenConnect", extensions: ["*.xml", "*.conf"] },
+        { id: "vpnc", name: "Cisco VPN (vpnc)", extensions: ["*.pcf", "*.conf"] },
+        { id: "fortisslvpn", name: "Fortinet SSLVPN", extensions: ["*.conf"] },
+        { id: "libreswan", name: "IPsec (Libreswan)", extensions: ["*.conf"] },
+        { id: "strongswan", name: "IPsec (strongSwan)", extensions: ["*.conf"] },
+        { id: "l2tp", name: "L2TP", extensions: ["*.conf"] },
+        { id: "pptp", name: "PPTP", extensions: ["*.conf"] },
+        { id: "sstp", name: "SSTP", extensions: ["*.conf"] },
+        { id: "iodine", name: "Iodine", extensions: ["*.conf"] },
+        { id: "ssh", name: "SSH tunnel", extensions: ["*.conf"] }
+    ]
+
+    function splitEscaped(line) {
+        const fields = []
+        let field = ""
+        let escaped = false
+
+        for (let index = 0; index < line.length; index++) {
+            const character = line[index]
+            if (escaped) {
+                field += character
+                escaped = false
+            } else if (character === "\\") {
+                escaped = true
+            } else if (character === ":") {
+                fields.push(field)
+                field = ""
             } else {
-                current += ch;
+                field += character
             }
         }
-        fields.push(current);
-        return fields;
+
+        if (escaped) field += "\\"
+        fields.push(field)
+        return fields
     }
 
-    function refresh() {
-        if (!listProc.running) listProc.running = true;
-    }
+    function applyProfileOutput(output) {
+        const nextProfiles = []
+        for (const line of output.trim().split("\n")) {
+            if (!line) continue
+            const fields = splitEscaped(line)
+            if (fields.length < 4) continue
 
-    function toggle() {
-        const profile = root.selectedProfile;
-        if (!profile) {
-            root.dialogRequested();
-            return;
+            const type = fields[2]
+            if (type !== "vpn" && type !== "wireguard") continue
+
+            const device = fields.slice(3).join(":")
+            nextProfiles.push({
+                name: fields[0],
+                uuid: fields[1],
+                type: type,
+                typeName: type === "wireguard" ? "WireGuard" : "VPN",
+                device: device === "--" ? "" : device,
+                active: device !== "" && device !== "--"
+            })
         }
-        if (busy) return;
-        if (root.connected) disconnectProc.exec(["nmcli", "connection", "down", "uuid", root.activeProfile.uuid]);
-        else connectProc.exec(["nmcli", "connection", "up", "uuid", profile.uuid]);
-    }
 
-    function connectTo(uuid) {
-        if (busy) return;
-        if (root.connected && root.activeProfile.uuid === uuid) {
-            disconnectProc.exec(["nmcli", "connection", "down", "uuid", uuid]);
-            return;
+        nextProfiles.sort((left, right) => {
+            if (left.active !== right.active) return left.active ? -1 : 1
+            return left.name.localeCompare(right.name)
+        })
+        profiles = nextProfiles
+
+        const activeProfile = nextProfiles.find(profile => profile.active)
+        if (activeProfile) {
+            preferredUuid = activeProfile.uuid
+        } else if (!nextProfiles.some(profile => profile.uuid === preferredUuid)) {
+            preferredUuid = nextProfiles[0]?.uuid ?? ""
         }
-        root.selectedUuid = uuid;
-        if (root.connected) {
-            root.pendingUuid = uuid;
-            disconnectProc.exec(["nmcli", "connection", "down", "uuid", root.activeProfile.uuid]);
-        } else {
-            connectProc.exec(["nmcli", "connection", "up", "uuid", uuid]);
+        if (!initialRefreshComplete) initialRefreshComplete = true
+        if (!restorePreviousConnection()) saveCurrentConnection()
+    }
+
+
+    function clearSavedConnection() {
+        if (!Persistent.ready) return
+        Persistent.states.vpn.restoreOnStartup = false
+        Persistent.states.vpn.lastConnectedUuid = ""
+    }
+
+    function saveCurrentConnection() {
+        if (!Persistent.ready || !restoreAttempted || busy || pendingOperation !== "") return
+        const activeProfile = profiles.find(profile => profile.active)
+        Persistent.states.vpn.restoreOnStartup = activeProfile !== undefined
+        Persistent.states.vpn.lastConnectedUuid = activeProfile?.uuid ?? ""
+    }
+
+    function restorePreviousConnection() {
+        if (restoreAttempted || !initialRefreshComplete || !Persistent.ready) return false
+        restoreAttempted = true
+
+        const activeProfile = profiles.find(profile => profile.active)
+        if (activeProfile) {
+            saveCurrentConnection()
+            return false
         }
+
+        const savedUuid = Persistent.states.vpn.lastConnectedUuid
+        if (Persistent.states.vpn.restoreOnStartup && profileForUuid(savedUuid)) {
+            connectProfile(savedUuid)
+            return true
+        }
+
+        clearSavedConnection()
+        return false
     }
 
-    function remove(uuid) {
-        actionProc.exec(["nmcli", "connection", "delete", "uuid", uuid]);
+    Connections {
+        target: Persistent
+        function onReadyChanged() {
+            if (Persistent.ready && !root.restorePreviousConnection()) {
+                root.saveCurrentConnection()
+            }
+        }
+
     }
 
-    function importFile(path) {
-        const file = path.trim();
-        if (file === "") return;
-        const type = file.toLowerCase().endsWith(".ovpn") ? "openvpn" : "wireguard";
-        actionProc.exec(["nmcli", "connection", "import", "type", type, "file", file]);
+    function profileForUuid(uuid) {
+        return profiles.find(profile => profile.uuid === uuid) ?? null
     }
 
-    function pickAndImport() {
-        if (!pickerProc.running) pickerProc.running = true;
+    function refreshProfiles() {
+        if (!refreshProcess.running) refreshProcess.running = true
     }
 
-    function notifyFailure(message) {
-        Quickshell.execDetached(["notify-send", "VPN", message, "-a", "Shell"]);
+    function startAction(operation, uuid, command) {
+        if (busy || importing) return
+        pendingOperation = operation
+        pendingUuid = uuid
+        lastError = ""
+        actionProcess.exec(command)
+    }
+
+    function connectProfile(uuid) {
+        if (!profileForUuid(uuid)) return
+        preferredUuid = uuid
+        startAction("connect", uuid, [
+            "nmcli", "--wait", "15", "connection", "up", "uuid", uuid
+        ])
+    }
+
+    function disconnectProfile(uuid) {
+        if (!profileForUuid(uuid)) return
+        if (busy || importing) return
+        clearSavedConnection()
+        startAction("disconnect", uuid, [
+            "nmcli", "--wait", "10", "connection", "down", "uuid", uuid
+        ])
+    }
+
+    function disconnectAll() {
+        if (activeProfiles.length === 0 || busy || importing) return
+        clearSavedConnection()
+        const command = ["nmcli", "--wait", "10", "connection", "down"]
+        for (const profile of activeProfiles) command.push("uuid", profile.uuid)
+        startAction("disconnect", "", command)
+    }
+
+    function toggleProfile(uuid) {
+        const profile = profileForUuid(uuid)
+        if (!profile) return
+        if (profile.active) disconnectProfile(uuid)
+        else connectProfile(uuid)
+    }
+
+    function togglePreferred() {
+        if (connected) {
+            disconnectAll()
+            return
+        }
+
+        const profile = profileForUuid(preferredUuid) ?? profiles[0] ?? null
+        if (profile) connectProfile(profile.uuid)
+        else dialogRequested()
+    }
+
+    function deleteProfile(uuid) {
+        if (!profileForUuid(uuid)) return
+        startAction("delete", uuid, [
+            "nmcli", "connection", "delete", "uuid", uuid
+        ])
+    }
+
+    function importProfile(type, filePath) {
+        if (busy || importing || !filePath) return
+        if (!importTypes.some(importType => importType.id === type)) {
+            lastError = Translation.tr("Unsupported VPN type")
+            return
+        }
+
+        lastError = ""
+        importProcess.importType = type
+        importProcess.filePath = filePath
+        importProcess.exec([
+            "nmcli", "connection", "import", "type", type, "file", filePath
+        ])
+    }
+
+    function fileFilter(type) {
+        const importType = importTypes.find(candidate => candidate.id === type)
+        if (!importType) return Translation.tr("VPN configuration") + " (*.conf *.ovpn)"
+        return `${importType.name} (${importType.extensions.join(" ")})`
+    }
+
+    function operationError(stderrText, fallback) {
+        const message = stderrText.trim().replace(/^Error:\s*/, "")
+        return message || fallback
+    }
+
+    function importedUuid(output) {
+        const match = output.match(/\(([0-9a-fA-F-]{36})\)/)
+        return match?.[1] ?? ""
+    }
+
+    Process {
+        id: refreshProcess
+        running: true
+        command: ["nmcli", "-t", "-f", "NAME,UUID,TYPE,DEVICE", "connection", "show"]
+        stdout: StdioCollector {
+            onStreamFinished: root.applyProfileOutput(text)
+        }
     }
 
     Timer {
-        running: GlobalStates.sidebarRightOpen
-        interval: 4000
+        interval: 3000
         repeat: true
         triggeredOnStart: true
-        onTriggered: root.refresh()
+        running: GlobalStates.sidebarRightOpen
+        onTriggered: root.refreshProfiles()
     }
 
     Process {
-        id: listProc
-        command: ["bash", "-c", "nmcli -t -f NAME,UUID,TYPE connection show; echo :::ACTIVE; nmcli -t -f UUID connection show --active"]
-        stdout: StdioCollector {
-            onStreamFinished: {
-                const parts = text.split(":::ACTIVE");
-                const found = [];
-                for (const line of parts[0].split("\n")) {
-                    const fields = root.splitFields(line);
-                    if (fields.length < 3) continue;
-                    if (fields[2] === "vpn" || fields[2] === "wireguard")
-                        found.push({ name: fields[0], uuid: fields[1], type: fields[2] });
-                }
-                root.profiles = found;
-                root.activeUuids = (parts[1] ?? "").split("\n").map(s => s.trim()).filter(s => s.length > 0);
+        id: actionProcess
+        stderr: StdioCollector { id: actionError }
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0) {
+                root.lastError = root.operationError(
+                    actionError.text,
+                    Translation.tr("VPN operation failed")
+                )
             }
+            root.pendingOperation = ""
+            root.pendingUuid = ""
+            root.refreshProfiles()
         }
     }
 
     Process {
-        id: connectProc
-        stderr: StdioCollector {
-            id: connectErr
-        }
-        onExited: (code, status) => {
-            if (code !== 0) root.notifyFailure(connectErr.text.trim() || "Connection failed");
-            root.refresh();
-        }
-    }
-
-    Process {
-        id: disconnectProc
-        onExited: {
-            if (root.pendingUuid !== "") {
-                const uuid = root.pendingUuid;
-                root.pendingUuid = "";
-                connectProc.exec(["nmcli", "connection", "up", "uuid", uuid]);
-                return;
+        id: importProcess
+        property string importType: ""
+        property string filePath: ""
+        stdout: StdioCollector { id: importOutput }
+        stderr: StdioCollector { id: importError }
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0) {
+                root.lastError = root.operationError(
+                    importError.text,
+                    Translation.tr("Failed to import VPN configuration")
+                )
+                root.refreshProfiles()
+                return
             }
-            root.refresh();
+
+            const uuid = root.importedUuid(importOutput.text)
+            if (uuid === "") {
+                root.refreshProfiles()
+                return
+            }
+
+            importedProfileSetup.exec([
+                "nmcli", "connection", "modify", "uuid", uuid,
+                "connection.autoconnect", "no"
+            ])
         }
     }
 
     Process {
-        id: actionProc
-        stderr: StdioCollector {
-            id: actionErr
-        }
-        onExited: (code, status) => {
-            if (code !== 0) root.notifyFailure(actionErr.text.trim() || "Action failed");
-            root.refresh();
-        }
-    }
-
-    Process {
-        id: pickerProc
-        command: ["bash", "-c", "kdialog --getopenfilename \"$HOME\" '*.conf *.ovpn|VPN configs' 2>/dev/null || zenity --file-selection --file-filter='*.conf *.ovpn' 2>/dev/null"]
-        stdout: StdioCollector {
-            id: pickerOut
-            onStreamFinished: root.importFile(pickerOut.text)
+        id: importedProfileSetup
+        stderr: StdioCollector { id: importedProfileSetupError }
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0) {
+                root.lastError = root.operationError(
+                    importedProfileSetupError.text,
+                    Translation.tr("Failed to disable VPN autoconnect")
+                )
+            }
+            root.refreshProfiles()
         }
     }
 }

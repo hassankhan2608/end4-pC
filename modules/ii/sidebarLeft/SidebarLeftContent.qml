@@ -15,11 +15,13 @@ Item {
     property bool translatorEnabled: Config.options.sidebar.translator.enable
     property bool animeEnabled: Config.options.policies.weeb !== 0
     property bool animeCloset: Config.options.policies.weeb === 2
+    property bool tailnetEnabled: true
     property bool mediaEnabled: Config.options.sidebar.media.enable
     property bool footballEnabled: Config.options.sidebar.football.enable
 
     readonly property var featurePages: [
         ...(root.aiChatEnabled ? [{"key": "ai", "icon": "neurology", "name": Translation.tr("Intelligence")}] : []),
+        ...(root.tailnetEnabled ? [{"key": "tailnet", "icon": "hub", "name": Translation.tr("Tailnet")}] : []),
         ...(root.translatorEnabled ? [{"key": "translator", "icon": "translate", "name": Translation.tr("Translator")}] : []),
         ...(root.mediaEnabled ? [{"key": "media", "icon": "music_note", "name": Translation.tr("Media")}] : []),
         ...(root.footballEnabled ? [{"key": "sports", "icon": "sports", "name": Translation.tr("Sports")}] : []),
@@ -206,11 +208,18 @@ Item {
 
                 PageSlot { pageKey: "home"; page: home }
                 PageSlot { pageKey: "ai"; enabledPage: root.aiChatEnabled; page: aiChat }
+                PageSlot { pageKey: "tailnet"; enabledPage: root.tailnetEnabled; page: tailnet }
                 PageSlot { pageKey: "translator"; enabledPage: root.translatorEnabled; page: translator }
                 PageSlot { pageKey: "media"; enabledPage: root.mediaEnabled; page: media }
                 PageSlot { pageKey: "sports"; enabledPage: root.footballEnabled; page: football }
                 PageSlot { pageKey: "anime"; enabledPage: root.animeEnabled && !root.animeCloset; page: anime }
             }
+        }
+
+        // Taildrop inbox: only shown while the Tailnet page is open
+        TaildropPanel {
+            visible: root.tailnetEnabled && root.currentKey === "tailnet"
+            Layout.fillWidth: true
         }
 
         Component {
@@ -223,6 +232,10 @@ Item {
         Component {
             id: aiChat
             AiChat {}
+        }
+        Component {
+            id: tailnet
+            Tailnet {}
         }
         Component {
             id: translator

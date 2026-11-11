@@ -613,7 +613,7 @@ Item {
     ToggleDialog {
         shownPropertyString: "showVpnDialog"
         dialog: VpnDialog {}
-        onShownChanged: if (shown) Vpn.refresh()
+        onShownChanged: if (shown) Vpn.refreshProfiles()
     }
 
     ToggleDialog {

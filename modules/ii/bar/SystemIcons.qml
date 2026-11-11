@@ -132,6 +132,14 @@ Item {
             iconSize: Appearance.font.pixelSize.larger
             color: root.iconColor
         }
+        Revealer {
+            reveal: Vpn.connected
+            MaterialSymbol {
+                text: "vpn_lock"
+                iconSize: Appearance.font.pixelSize.larger
+                color: root.isMaterial ? Appearance.colors.colOnPrimary : Appearance.colors.colOnLayer1
+            }
+        }
         MaterialSymbol {
             visible: BluetoothStatus.available
             text: BluetoothStatus.connected ? "bluetooth_connected" : BluetoothStatus.enabled ? "bluetooth" : "bluetooth_disabled"
