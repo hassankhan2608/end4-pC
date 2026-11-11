@@ -78,24 +78,42 @@ Item {
             "--title", Translation.tr("Send file via Taildrop")])
     }
 
+    // Interactive by design: the login name differs per host, so it is asked for
+    // in the terminal, with the last answer for that host offered back.
     function sshDevice(host: string): void {
-        // Prompt for the user in the terminal itself (pre-filled with the
-        // last choice for this host), then ssh; hold the window on failure
+        if (host.length === 0) return
+        const stateFile = FileUtils.trimFileProtocol(Directories.state) + "/user/tailnet-ssh-users"
         const script = `
-host=${host}
-sf="\${XDG_STATE_HOME:-$HOME/.local/state}/quickshell/tailnet-ssh-users"
-mkdir -p "\${sf%/*}"; touch "$sf"
-saved=$(awk -v h="$host" '$1==h{u=$2} END{print u}' "$sf")
-read -r -e -i "\${saved:-$USER}" -p "[$host] SSH user: " u
-[ -z "$u" ] && exit 0
-{ grep -v "^$host " "$sf"; echo "$host $u"; } > "$sf.tmp" && mv "$sf.tmp" "$sf"
-    $HOME/.local/bin/ssh-mono "$u@$host"
-    ret=$?
-    if [ $ret -ne 0 ]; then
-        { echo; echo "-- ssh failed, press any key to close --"; read -rn1 -s; }
-    fi`
-        Quickshell.execDetached(["bash", "-c",
-            `${Config.options.apps.terminal} bash -c '${StringUtils.shellSingleQuoteEscape(script)}'`])
+host=$1
+state_file=$2
+mkdir -p -- "\${state_file%/*}"
+touch -- "$state_file"
+saved=$(awk -v h="$host" '$1 == h { user=$2 } END { print user }' "$state_file")
+read -r -e -i "\${saved:-$USER}" -p "[$host] SSH user: " user
+[ -n "$user" ] || exit 0
+awk -v h="$host" '$1 != h' "$state_file" > "$state_file.tmp"
+printf '%s %s\\n' "$host" "$user" >> "$state_file.tmp"
+mv -- "$state_file.tmp" "$state_file"
+# Hand the remote a copy of this terminal's terminfo before the session starts:
+# a command run over ssh gets no TTY, so sshd sets no TERM there at all.
+term=\${TERM:-}
+if [ -n "$term" ] && infocmp -x "$term" >/dev/null 2>&1; then
+    infocmp -x "$term" 2>/dev/null \\
+        | ssh "$user@$host" "infocmp '$term' >/dev/null 2>&1 || tic -x -" >/dev/null 2>&1
+fi
+ssh "$user@$host"
+status=$?
+if (( status != 0 )); then
+    printf '\\n-- ssh failed, press any key to close --'
+    read -rn1 -s
+fi`
+        const scriptArg = `'${StringUtils.shellSingleQuoteEscape(script)}'`
+        const hostArg = `'${StringUtils.shellSingleQuoteEscape(host)}'`
+        const stateArg = `'${StringUtils.shellSingleQuoteEscape(stateFile)}'`
+        Quickshell.execDetached([
+            "bash", "-lc",
+            `${Config.options.apps.terminal} bash -lc ${scriptArg} _ ${hostArg} ${stateArg}`
+        ])
     }
 
     function notify(summary: string, body: string): void {
